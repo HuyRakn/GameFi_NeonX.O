@@ -394,6 +394,15 @@ export class GameService {
   }
 
   /**
+   * Get room ID by socket ID
+   * @param socketId - Socket ID
+   * @returns Room ID or undefined
+   */
+  getRoomBySocketId(socketId: string): string | undefined {
+    return this.playerRooms.get(socketId);
+  }
+
+  /**
    * Handle player disconnection
    * @param socketId - Socket ID
    */

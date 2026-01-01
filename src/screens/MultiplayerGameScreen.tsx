@@ -18,23 +18,54 @@ import { GameBoard } from '../components/GameBoard';
 import { NeonCard } from '../components/NeonCard';
 import { StatusIndicator } from '../components/StatusIndicator';
 import { GameOverModal } from '../components/GameOverModal';
+import { NeonModal } from '../components/NeonModal';
+import { NeonButton } from '../components/NeonButton';
 import { useSocket } from '../hooks/useSocket';
+import { useGameTransactions } from '../hooks/useGameTransactions';
+import { useWallet } from '../contexts/WalletContext';
 import { GameState, Player, GameMode } from '../types/game';
 
 interface MultiplayerGameScreenProps {
   mode: GameMode;
   roomId?: string;
-  playerId: string;
   onBack: () => void;
 }
 
 export function MultiplayerGameScreen({
   mode,
   roomId: initialRoomId,
-  playerId,
   onBack,
 }: MultiplayerGameScreenProps) {
   const { socket, connected, joinRoom, createRoom, findMatch, cancelMatchmaking, makeMove } = useSocket();
+  const { payEntryFee, isProcessing: isPaymentProcessing } = useGameTransactions();
+  const { connected: walletConnected, publicKey: walletPublicKey } = useWallet();
+  
+  const playerId = walletPublicKey?.toBase58() || '';
+  
+  if (!walletConnected || !walletPublicKey) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={onBack} style={styles.backButton}>
+            <Ionicons name="arrow-back" size={24} color="#00f3ff" />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Wallet Required</Text>
+          <View style={styles.backButton} />
+        </View>
+        <View style={styles.loadingContainer}>
+          <NeonCard variant="primary">
+            <View style={styles.walletRequiredContent}>
+              <Ionicons name="wallet-outline" size={64} color="#00f3ff" />
+              <Text style={styles.walletRequiredText}>Wallet Not Connected</Text>
+              <Text style={styles.walletRequiredSubtext}>
+                Please connect your wallet to play Competitive modes
+              </Text>
+            </View>
+          </NeonCard>
+        </View>
+      </View>
+    );
+  }
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [roomId, setRoomId] = useState<string | null>(initialRoomId || null);
   const [isMatchmaking, setIsMatchmaking] = useState(false);
@@ -43,6 +74,10 @@ export function MultiplayerGameScreen({
   const [myPlayer, setMyPlayer] = useState<Player>(null);
   const [showGameOver, setShowGameOver] = useState(false);
   const [gameResult, setGameResult] = useState<{ winner: Player | null; isDraw: boolean } | null>(null);
+  const [paymentStatus, setPaymentStatus] = useState<'idle' | 'processing' | 'success' | 'failed'>('idle');
+  const [paymentError, setPaymentError] = useState<string | null>(null);
+  const [pendingMatch, setPendingMatch] = useState<{ roomId: string; opponent: string; gameState?: GameState; player?: Player } | null>(null);
+  const [showInfoModal, setShowInfoModal] = useState(false);
 
   const pulse = useSharedValue(0);
 
@@ -97,18 +132,71 @@ export function MultiplayerGameScreen({
       }
     });
 
-    socket.on('match-found', (data: { roomId: string; opponent: string; gameState?: GameState; player?: Player }) => {
-      setRoomId(data.roomId);
-      setOpponentId(data.opponent);
+    socket.on('match-found', async (data: { roomId: string; opponent: string; gameState?: GameState; player?: Player }) => {
       setIsMatchmaking(false);
-      setIsWaiting(false);
-      if (data.gameState) {
-        setGameState(data.gameState);
+      
+      // Check if this mode requires entry fee
+      const requiresPayment = mode === 'RANKED_IRON' || mode === 'RANKED_NEON' || mode === 'WHALE_WARS';
+      
+      if (requiresPayment && walletConnected && walletPublicKey) {
+        // Store match data temporarily
+        setPendingMatch(data);
+        setPaymentStatus('processing');
+        setPaymentError(null);
+        
+        // Request payment
+        try {
+          const result = await payEntryFee(mode);
+          
+          if (result.success && result.signature) {
+            setPaymentStatus('success');
+            
+            // Notify backend that payment is complete
+            socket.emit('payment-confirmed', {
+              roomId: data.roomId,
+              playerId: playerId,
+              signature: result.signature,
+            });
+            
+            // Proceed with match
+            setRoomId(data.roomId);
+            setOpponentId(data.opponent);
+            setIsWaiting(false);
+            if (data.gameState) {
+              setGameState(data.gameState);
+            }
+            if (data.player) {
+              setMyPlayer(data.player);
+            }
+            setPendingMatch(null);
+          } else {
+            setPaymentStatus('failed');
+            setPaymentError(result.error || 'Payment failed');
+            // Cancel matchmaking on payment failure
+            cancelMatchmaking(playerId, mode);
+          }
+        } catch (error: any) {
+          setPaymentStatus('failed');
+          setPaymentError(error.message || 'Payment error');
+          cancelMatchmaking(playerId, mode);
+        }
+      } else if (!requiresPayment) {
+        // No payment required, proceed directly
+        setRoomId(data.roomId);
+        setOpponentId(data.opponent);
+        setIsWaiting(false);
+        if (data.gameState) {
+          setGameState(data.gameState);
+        }
+        if (data.player) {
+          setMyPlayer(data.player);
+        }
+      } else {
+        // Payment required but wallet not connected
+        setPaymentStatus('failed');
+        setPaymentError('Wallet not connected. Please connect your wallet first.');
+        cancelMatchmaking(playerId, mode);
       }
-      if (data.player) {
-        setMyPlayer(data.player);
-      }
-      // Backend already handled joinRoom, just update state
     });
 
     socket.on('matchmaking-started', () => {
@@ -137,7 +225,30 @@ export function MultiplayerGameScreen({
     });
 
     socket.on('room-error', (data: { message: string }) => {
-      // Handle error
+      console.error('[Multiplayer] Room error:', data.message);
+    });
+
+    socket.on('opponent-disconnected', (data: { roomId: string; refundSignature?: string }) => {
+      console.log('[Multiplayer] Opponent disconnected, refunding...');
+      if (data.refundSignature) {
+        setPaymentError(null);
+        setPaymentStatus('idle');
+      }
+      onBack();
+    });
+
+    socket.on('payment-required', (data: { roomId: string }) => {
+      setIsWaiting(true);
+    });
+
+    socket.on('payment-success', (data: { roomId: string }) => {
+      setPaymentStatus('success');
+      setPaymentError(null);
+    });
+
+    socket.on('payment-error', (data: { message: string }) => {
+      setPaymentStatus('failed');
+      setPaymentError(data.message);
     });
 
     return () => {
@@ -151,8 +262,12 @@ export function MultiplayerGameScreen({
       socket.off('game-finished');
       socket.off('move-error');
       socket.off('room-error');
+      socket.off('opponent-disconnected');
+      socket.off('payment-required');
+      socket.off('payment-success');
+      socket.off('payment-error');
     };
-  }, [socket, playerId, joinRoom]);
+  }, [socket, playerId, joinRoom, payEntryFee, mode, walletConnected, walletPublicKey, cancelMatchmaking, onBack]);
 
   /**
    * Start matchmaking for ranked modes
@@ -240,7 +355,12 @@ export function MultiplayerGameScreen({
             <Ionicons name="arrow-back" size={24} color="#00f3ff" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Finding Match</Text>
-          <View style={styles.backButton} />
+          <TouchableOpacity 
+            onPress={() => setShowInfoModal(true)} 
+            style={styles.backButton}
+          >
+            <Ionicons name="information-circle-outline" size={24} color="#00f3ff" />
+          </TouchableOpacity>
         </View>
         <View style={styles.loadingContainer}>
           <Animated.View style={[styles.matchmakingCard, pulseStyle]}>
@@ -270,28 +390,65 @@ export function MultiplayerGameScreen({
     );
   }
 
-  if (isWaiting || !gameState) {
+  if (paymentStatus === 'processing' || isWaiting || !gameState) {
     return (
       <View style={styles.container}>
         <View style={styles.header}>
           <TouchableOpacity onPress={onBack} style={styles.backButton}>
             <Ionicons name="arrow-back" size={24} color="#00f3ff" />
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>Waiting</Text>
-          <View style={styles.backButton} />
+          <Text style={styles.headerTitle}>
+            {paymentStatus === 'processing' ? 'Processing Payment' : 'Waiting'}
+          </Text>
+          <TouchableOpacity 
+            onPress={() => setShowInfoModal(true)} 
+            style={styles.backButton}
+          >
+            <Ionicons name="information-circle-outline" size={24} color="#00f3ff" />
+          </TouchableOpacity>
         </View>
         <View style={styles.loadingContainer}>
-          <Animated.View style={[styles.waitingCard, pulseStyle]}>
-            <NeonCard variant="primary">
-              <View style={styles.waitingContent}>
-                <StatusIndicator status="waiting" label="Waiting" />
-                <Text style={styles.waitingText}>Waiting for opponent...</Text>
-                {roomId && (
-                  <Text style={styles.roomIdText}>Room: {roomId}</Text>
-                )}
+          {paymentStatus === 'processing' ? (
+            <Animated.View style={[styles.waitingCard, pulseStyle]}>
+              <NeonCard variant="primary">
+                <View style={styles.waitingContent}>
+                  <ActivityIndicator size="large" color="#00f3ff" />
+                  <Text style={styles.waitingText}>Processing payment...</Text>
+                  <Text style={styles.waitingSubtext}>Please approve the transaction in your wallet</Text>
+                </View>
+              </NeonCard>
+            </Animated.View>
+          ) : (
+            <Animated.View style={[styles.waitingCard, pulseStyle]}>
+              <NeonCard variant="primary">
+                <View style={styles.waitingContent}>
+                  <StatusIndicator status="waiting" label="Waiting" />
+                  <Text style={styles.waitingText}>Waiting for opponent...</Text>
+                  {roomId && (
+                    <Text style={styles.roomIdText}>Room: {roomId}</Text>
+                  )}
+                </View>
+              </NeonCard>
+            </Animated.View>
+          )}
+          {paymentError && (
+            <NeonCard variant="danger" style={styles.errorCard}>
+              <View style={styles.errorContent}>
+                <Ionicons name="alert-circle" size={24} color="#ff8a00" />
+                <Text style={styles.errorText}>{paymentError}</Text>
+                <TouchableOpacity
+                  style={styles.retryButton}
+                  onPress={() => {
+                    setPaymentError(null);
+                    setPaymentStatus('idle');
+                    onBack();
+                  }}
+                >
+                  <Text style={styles.retryButtonText}>Go Back</Text>
+                </TouchableOpacity>
               </View>
             </NeonCard>
-          </Animated.View>
+          )}
         </View>
       </View>
     );
@@ -316,7 +473,12 @@ export function MultiplayerGameScreen({
             )}
           </View>
         </View>
-        <View style={styles.backButton} />
+        <TouchableOpacity 
+          onPress={() => setShowInfoModal(true)} 
+          style={styles.backButton}
+        >
+          <Ionicons name="information-circle-outline" size={24} color="#00f3ff" />
+        </TouchableOpacity>
       </View>
 
       <View style={styles.gameContainer}>
@@ -376,6 +538,67 @@ export function MultiplayerGameScreen({
           variant={mode === 'WHALE_WARS' ? 'danger' : mode === 'RANKED_NEON' ? 'secondary' : 'primary'}
         />
       )}
+
+      {/* Game Info Modal */}
+      <NeonModal
+        visible={showInfoModal}
+        onClose={() => setShowInfoModal(false)}
+        title="Game Info"
+        variant={mode === 'WHALE_WARS' ? 'danger' : mode === 'RANKED_NEON' ? 'secondary' : 'primary'}
+      >
+        <View style={styles.infoContent}>
+          <View style={styles.infoSection}>
+            <Text style={styles.infoLabel}>Mode</Text>
+            <Text style={styles.infoValue}>
+              {mode === 'RANKED_IRON' ? 'Ranked Iron' :
+               mode === 'RANKED_NEON' ? 'Ranked Neon' :
+               mode === 'WHALE_WARS' ? 'Whale Wars' : 'Multiplayer'}
+            </Text>
+          </View>
+          <View style={styles.infoSection}>
+            <Text style={styles.infoLabel}>Board Size</Text>
+            <Text style={styles.infoValue}>
+              {mode === 'RANKED_IRON' ? '3x3' :
+               mode === 'RANKED_NEON' ? '6x6' :
+               mode === 'WHALE_WARS' ? '8x8' : '3x3'}
+            </Text>
+          </View>
+          <View style={styles.infoSection}>
+            <Text style={styles.infoLabel}>Rules</Text>
+            <Text style={styles.infoText}>
+              {mode === 'RANKED_IRON' 
+                ? 'Classic Tic-Tac-Toe: Get 3 in a row to win!'
+                : mode === 'RANKED_NEON'
+                ? 'Extended Tic-Tac-Toe: Get 5 in a row to win on a 6x6 board!'
+                : mode === 'WHALE_WARS'
+                ? 'Gomoku: Get 5 in a row to win on an 8x8 board!'
+                : 'Classic Tic-Tac-Toe: Get 3 in a row to win!'}
+            </Text>
+          </View>
+          {opponentId && (
+            <View style={styles.infoSection}>
+              <Text style={styles.infoLabel}>Opponent</Text>
+              <Text style={styles.infoText}>
+                {opponentId.slice(0, 8)}...{opponentId.slice(-8)}
+              </Text>
+            </View>
+          )}
+          {roomId && (
+            <View style={styles.infoSection}>
+              <Text style={styles.infoLabel}>Room ID</Text>
+              <Text style={styles.infoText}>{roomId}</Text>
+            </View>
+          )}
+          <View style={styles.infoButtons}>
+            <NeonButton
+              title="Close"
+              onPress={() => setShowInfoModal(false)}
+              variant={mode === 'WHALE_WARS' ? 'danger' : mode === 'RANKED_NEON' ? 'secondary' : 'primary'}
+              fullWidth
+            />
+          </View>
+        </View>
+      </NeonModal>
     </View>
   );
 }
@@ -475,6 +698,40 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: 'monospace',
   },
+  waitingSubtext: {
+    color: '#71717a',
+    fontSize: 12,
+    fontFamily: 'monospace',
+    marginTop: 8,
+  },
+  errorCard: {
+    marginTop: 16,
+    width: '100%',
+  },
+  errorContent: {
+    alignItems: 'center',
+    gap: 12,
+  },
+  errorText: {
+    color: '#ff8a00',
+    fontSize: 14,
+    fontFamily: 'monospace',
+    textAlign: 'center',
+  },
+  retryButton: {
+    marginTop: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 24,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: '#ff8a00',
+  },
+  retryButtonText: {
+    color: '#ff8a00',
+    fontSize: 14,
+    fontWeight: '600',
+    fontFamily: 'monospace',
+  },
   cancelButton: {
     marginTop: 16,
     paddingVertical: 12,
@@ -515,5 +772,54 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     fontFamily: 'monospace',
     letterSpacing: 2,
+  },
+  walletRequiredContent: {
+    alignItems: 'center',
+    gap: 16,
+    padding: 24,
+  },
+  walletRequiredText: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#00f3ff',
+    fontFamily: 'monospace',
+  },
+  walletRequiredSubtext: {
+    fontSize: 14,
+    color: '#71717a',
+    fontFamily: 'monospace',
+    textAlign: 'center',
+  },
+  infoContent: {
+    gap: 24,
+    paddingVertical: 10,
+  },
+  infoSection: {
+    gap: 8,
+  },
+  infoLabel: {
+    fontSize: 12,
+    color: '#71717a',
+    fontFamily: 'monospace',
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  infoValue: {
+    fontSize: 18,
+    color: '#ffffff',
+    fontFamily: 'monospace',
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  infoText: {
+    fontSize: 14,
+    color: '#a1a1aa',
+    fontFamily: 'monospace',
+    lineHeight: 20,
+  },
+  infoButtons: {
+    marginTop: 8,
+    gap: 12,
   },
 });

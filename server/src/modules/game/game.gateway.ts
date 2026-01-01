@@ -15,6 +15,7 @@ import {
 import { Server, Socket } from 'socket.io';
 import { Injectable, Logger } from '@nestjs/common';
 import { GameService } from './game.service';
+import { EscrowService } from './escrow.service';
 
 @Injectable()
 @WebSocketGateway({
@@ -32,7 +33,10 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   private readonly logger = new Logger(GameGateway.name);
 
-  constructor(private readonly gameService: GameService) {
+  constructor(
+    private readonly gameService: GameService,
+    private readonly escrowService: EscrowService,
+  ) {
     this.logger.log('GameGateway initialized');
   }
 
@@ -54,6 +58,41 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.logger.error('GameService is undefined in handleDisconnect!');
       return;
     }
+
+    const roomId = this.gameService.getRoomBySocketId(client.id);
+    if (roomId) {
+      const room = await this.gameService.getRoom(roomId);
+      if (room) {
+        const escrow = this.escrowService.getEscrow(roomId);
+        
+        if (escrow && (escrow.status === 'pending' || escrow.status === 'active')) {
+          const disconnectedPlayerId = room.players.find(p => {
+            const socketId = this.gameService.getPlayerSocket(p);
+            return socketId === client.id;
+          });
+          
+          if (disconnectedPlayerId) {
+            const refundSignature = await this.escrowService.refundOnDisconnect(roomId, disconnectedPlayerId);
+            
+            const otherPlayerId = room.players.find(p => p !== disconnectedPlayerId);
+            if (otherPlayerId) {
+              const otherPlayerSocketId = this.gameService.getPlayerSocket(otherPlayerId);
+              
+              if (otherPlayerSocketId) {
+                this.server.to(otherPlayerSocketId).emit('opponent-disconnected', {
+                  roomId,
+                  refundSignature: refundSignature || undefined,
+                  message: refundSignature 
+                    ? 'Opponent disconnected. Your payment has been refunded.' 
+                    : 'Opponent disconnected before payment was completed.',
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
     await this.gameService.handleDisconnect(client.id);
   }
 
@@ -139,6 +178,16 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       // Check if game is finished
       if (result.gameState.status === 'FINISHED' || result.gameState.status === 'DRAW') {
         await this.gameService.finishGame(roomId, result.gameState.winner);
+        
+        // Payout winner from escrow
+        const escrow = this.escrowService.getEscrow(roomId);
+        if (escrow && escrow.status === 'active') {
+          const payoutSignature = await this.escrowService.payoutWinner(roomId, result.gameState.winner);
+          if (payoutSignature) {
+            this.logger.log(`Payout completed for room ${roomId}: ${payoutSignature}`);
+          }
+        }
+        
         this.server.to(roomId).emit('game-finished', {
           winner: result.gameState.winner,
           gameState: result.gameState,
@@ -206,6 +255,12 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
         
         const gameState = this.gameService.getGameState(roomId);
         
+        // Create escrow for ranked modes
+        const requiresPayment = mode === 'RANKED_IRON' || mode === 'RANKED_NEON' || mode === 'WHALE_WARS';
+        if (requiresPayment) {
+          this.escrowService.createEscrow(roomId, playerId, opponent.playerId, mode);
+        }
+        
         // Assign players: creator is X, opponent is O
         this.server.to(client.id).emit('match-found', { 
           roomId, 
@@ -243,6 +298,72 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
     } catch (error) {
       console.error('Error in handleCancelMatchmaking:', error);
+    }
+  }
+
+  /**
+   * Handle payment confirmation
+   * @param client - Socket client
+   * @param data - Payment confirmation data
+   */
+  @SubscribeMessage('payment-confirmed')
+  async handlePaymentConfirmed(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { roomId: string; playerId: string; signature: string }
+  ) {
+    try {
+      const { roomId, playerId, signature } = data;
+      
+      const room = await this.gameService.getRoom(roomId);
+      if (!room) {
+        client.emit('payment-error', { message: 'Room not found' });
+        return;
+      }
+
+      const mode = room.mode;
+      const verification = await this.escrowService.verifyPayment(signature, playerId, mode);
+      
+      if (!verification.valid) {
+        client.emit('payment-error', { message: verification.error || 'Payment verification failed' });
+        return;
+      }
+
+      const result = await this.escrowService.recordPayment(roomId, playerId, signature);
+      
+      if (!result.success) {
+        client.emit('payment-error', { message: result.error || 'Failed to record payment' });
+        return;
+      }
+
+      client.emit('payment-success', { roomId });
+
+      if (result.allPaid) {
+        const gameState = this.gameService.getGameState(roomId);
+        if (gameState) {
+          const playerXId = room.players[0];
+          const playerOId = room.players[1];
+          const playerXSocketId = this.gameService.getPlayerSocket(playerXId);
+          const playerOSocketId = this.gameService.getPlayerSocket(playerOId);
+          
+          if (playerXSocketId) {
+            this.server.to(playerXSocketId).emit('game-started', {
+              gameState,
+              player: 'X',
+            });
+          }
+          if (playerOSocketId) {
+            this.server.to(playerOSocketId).emit('game-started', {
+              gameState,
+              player: 'O',
+            });
+          }
+        }
+      } else {
+        this.server.to(roomId).emit('payment-required', { roomId });
+      }
+    } catch (error: any) {
+      this.logger.error('Error in handlePaymentConfirmed:', error);
+      client.emit('payment-error', { message: error.message || 'Payment confirmation failed' });
     }
   }
 }

@@ -26,15 +26,8 @@ const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 export function NeonGrid({ board, onCellPress, winningLine, disabled = false }: NeonGridProps) {
   const boardSize = board.length;
   
-  // Calculate font size based on board size to match O's scaling
-  // O uses 75% of cellContent (which is 80% of cell), so effective size is 60% of cell
-  // For X, we want similar visual size, so calculate fontSize to match O's diameter
-  // Base calculation: fontSize should scale inversely with board size
   const getFontSize = () => {
-    // Base size for 3x3 board - adjusted to match O's visual size
-    const baseSize = 70;
-    // Scale down for larger boards (inverse relationship)
-    // Add slight adjustment factor to better match O's visual appearance
+    const baseSize = 85;
     const scaleFactor = 3 / boardSize;
     return Math.round(baseSize * scaleFactor);
   };
@@ -206,10 +199,10 @@ const styles = StyleSheet.create({
     includeFontPadding: false, // Remove extra padding for better alignment
   },
   circle: {
-    width: '75%',
-    height: '75%',
-    borderRadius: 999,
-    borderWidth: 4,
+    width: '85%',
+    aspectRatio: 1,
+    borderRadius: 9999,
+    borderWidth: 5,
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.6,
     shadowRadius: 8,

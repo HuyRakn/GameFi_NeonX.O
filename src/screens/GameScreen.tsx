@@ -16,6 +16,8 @@ import { GameBoard } from '../components/GameBoard';
 import { NeonCard } from '../components/NeonCard';
 import { StatusIndicator } from '../components/StatusIndicator';
 import { GameOverModal } from '../components/GameOverModal';
+import { NeonModal } from '../components/NeonModal';
+import { NeonButton } from '../components/NeonButton';
 import { TicTacToeEngine } from '../engines/TicTacToeEngine';
 import { BotAI } from '../engines/BotAI';
 import { GameMode, Player, GameConfig, GameState } from '../types/game';
@@ -32,6 +34,7 @@ export function GameScreen({ mode, onBack }: GameScreenProps) {
   const [isBotThinking, setIsBotThinking] = useState(false);
   const [showGameOver, setShowGameOver] = useState(false);
   const [gameResult, setGameResult] = useState<{ winner: Player | null; isDraw: boolean } | null>(null);
+  const [showInfoModal, setShowInfoModal] = useState(false);
 
   const headerOpacity = useSharedValue(1);
 
@@ -204,7 +207,12 @@ export function GameScreen({ mode, onBack }: GameScreenProps) {
             <StatusIndicator status="connected" />
           </View>
         </View>
-        <View style={styles.backButton} />
+        <TouchableOpacity 
+          onPress={() => setShowInfoModal(true)} 
+          style={styles.backButton}
+        >
+          <Ionicons name="information-circle-outline" size={24} color="#00f3ff" />
+        </TouchableOpacity>
       </Animated.View>
 
       {/* Game Board */}
@@ -248,6 +256,54 @@ export function GameScreen({ mode, onBack }: GameScreenProps) {
           variant={mode === 'BOT_BATTLE' ? 'secondary' : 'primary'}
         />
       )}
+
+      {/* Game Info Modal */}
+      <NeonModal
+        visible={showInfoModal}
+        onClose={() => setShowInfoModal(false)}
+        title="Game Info"
+        variant={mode === 'BOT_BATTLE' ? 'secondary' : 'primary'}
+      >
+        <View style={styles.infoContent}>
+          <View style={styles.infoSection}>
+            <Text style={styles.infoLabel}>Mode</Text>
+            <Text style={styles.infoValue}>
+              {mode === 'TRAINING' ? 'Training' : 'Bot Battle'}
+            </Text>
+          </View>
+          <View style={styles.infoSection}>
+            <Text style={styles.infoLabel}>Board Size</Text>
+            <Text style={styles.infoValue}>
+              {mode === 'TRAINING' ? '3x3' : '6x6'}
+            </Text>
+          </View>
+          <View style={styles.infoSection}>
+            <Text style={styles.infoLabel}>Rules</Text>
+            <Text style={styles.infoText}>
+              {mode === 'TRAINING' 
+                ? 'Classic Tic-Tac-Toe: Get 3 in a row to win!'
+                : 'Extended Tic-Tac-Toe: Get 5 in a row to win on a 6x6 board!'}
+            </Text>
+          </View>
+          <View style={styles.infoButtons}>
+            <NeonButton
+              title="Reset Game"
+              onPress={() => {
+                setShowInfoModal(false);
+                handleReset();
+              }}
+              variant={mode === 'BOT_BATTLE' ? 'secondary' : 'primary'}
+              fullWidth
+            />
+            <NeonButton
+              title="Close"
+              onPress={() => setShowInfoModal(false)}
+              variant="secondary"
+              fullWidth
+            />
+          </View>
+        </View>
+      </NeonModal>
     </View>
   );
 }
@@ -317,5 +373,37 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     fontFamily: 'monospace',
     letterSpacing: 0.5,
+  },
+  infoContent: {
+    gap: 24,
+    paddingVertical: 10,
+  },
+  infoSection: {
+    gap: 8,
+  },
+  infoLabel: {
+    fontSize: 12,
+    color: '#71717a',
+    fontFamily: 'monospace',
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  infoValue: {
+    fontSize: 18,
+    color: '#ffffff',
+    fontFamily: 'monospace',
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  infoText: {
+    fontSize: 14,
+    color: '#a1a1aa',
+    fontFamily: 'monospace',
+    lineHeight: 20,
+  },
+  infoButtons: {
+    marginTop: 8,
+    gap: 12,
   },
 });
