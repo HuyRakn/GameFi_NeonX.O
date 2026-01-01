@@ -1,0 +1,47 @@
+{
+  "name": "neon-xo",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web",
+    "backend": "cd server && npm run dev",
+    "backend:install": "cd server && npm install",
+    "dev": "concurrently \"npm run backend\" \"npm run start\"",
+    "dev:android": "concurrently \"npm run backend\" \"npm run android\"",
+    "dev:ios": "concurrently \"npm run backend\" \"npm run ios\""
+  },
+  "dependencies": {
+    "@expo/vector-icons": "^15.0.3",
+    "@react-native-async-storage/async-storage": "^2.2.0",
+    "@solana-mobile/mobile-wallet-adapter-protocol": "2.2.5",
+    "@solana-mobile/mobile-wallet-adapter-protocol-web3js": "2.2.5",
+    "@solana/web3.js": "1.91.8",
+    "buffer": "^6.0.3",
+    "expo": "~54.0.30",
+    "expo-constants": "^18.0.12",
+    "expo-linear-gradient": "^15.0.8",
+    "expo-secure-store": "~14.0.0",
+    "expo-status-bar": "~3.0.9",
+    "nativewind": "^4.0.1",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-gesture-handler": "~2.28.0",
+    "react-native-get-random-values": "^2.0.0",
+    "react-native-reanimated": "~4.1.1",
+    "react-native-safe-area-context": "^5.6.2",
+    "socket.io-client": "4.7.5"
+  },
+  "devDependencies": {
+    "@types/react": "~19.1.0",
+    "babel-preset-expo": "~11.0.0",
+    "concurrently": "^8.2.2",
+    "tailwindcss": "^3.4.0",
+    "typescript": "~5.9.2"
+  },
+  "private": true
+}
+
+
